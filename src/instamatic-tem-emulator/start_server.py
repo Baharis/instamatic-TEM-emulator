@@ -9,9 +9,8 @@ from functools import partial
 from queue import Queue
 from typing import Any, Optional
 
-from serializer import dumper, loader
-
 from instamatic.microscope.interface.simu_microscope import SimuMicroscope
+from instamatic.server.serializer import dumper, loader
 
 
 stop_program_event = threading.Event()
