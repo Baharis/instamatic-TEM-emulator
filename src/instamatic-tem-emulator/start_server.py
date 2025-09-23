@@ -12,6 +12,8 @@ from typing import Any, Optional
 from instamatic.microscope.interface.simu_microscope import SimuMicroscope
 from instamatic.server.serializer import dumper, loader
 
+from simulation.camera import CameraEmulator
+
 
 stop_program_event = threading.Event()
 
@@ -48,11 +50,11 @@ class EmulatedDeviceServer(threading.Thread):
 
     device_implementation_run_kwargs = {}
 
-    def __init__(self, device_kind: EmulatedDeviceKind) -> None:
+    def __init__(self, device_kind: EmulatedDeviceKind, **device_kwargs) -> None:
         """Initialize appropriate device kind and connect to the device"""
         super(EmulatedDeviceServer, self).__init__()
         self.device: EmulatedDeviceImplementation = None
-        self._device_init_kwargs = {}
+        self._device_init_kwargs = device_kwargs or {}
         self._device_kind: EmulatedDeviceKind = device_kind
         self.verbose = False
 
@@ -85,18 +87,6 @@ class EmulatedDeviceServer(threading.Thread):
         logging.info(func_name, args, kwargs)
         f = getattr(self.device, func_name)
         return f(*args, **kwargs)
-
-
-class EmulatedCamServer(EmulatedDeviceServer):
-    """Specific implementation for a tem-aware camera to simulate images"""
-
-    def __init__(self, device_kind: EmulatedDeviceKind, tem: EmulatedDeviceImplementation) -> None:
-        """Additionally include tem instance in cam initialization kwargs"""
-        super(EmulatedDeviceServer, self).__init__()
-        self.device: EmulatedDeviceImplementation = None
-        self._device_init_kwargs = {'tem': tem}
-        self._kind: EmulatedDeviceKind = device_kind
-        self.verbose = False
 
 
 def handle(connection: socket.socket, device_kind: EmulatedDeviceKind) -> None:
@@ -164,15 +154,20 @@ def main():
     # options = parser.parse_args()
 
     tem = EmulatedDeviceKind('microscope', SimuMicroscope, logging.getLogger('tem'))
-    cam = EmulatedDeviceKind('camera', ..., logging.getLogger('cam'))
+    cam = EmulatedDeviceKind('camera', CameraEmulator, logging.getLogger('cam'))
 
     tem_server = EmulatedDeviceServer(device_kind=tem)
     tem_server.start()
 
-    cam_server = EmulatedCamServer(device_kind=cam, tem=tem_server.device)
+    cam_server = EmulatedDeviceServer(device_kind=cam, tem=tem_server.device)
     cam_server.start()
 
     signal.signal(signal.SIGINT, handle_keyboard_interrupt)
 
     threading.Thread(target=listen_on, args=(5000, tem)).start()
     threading.Thread(target=listen_on, args=(5001, cam)).start()
+    print('All initialized')
+
+
+if __name__ == '__main__':
+    main()

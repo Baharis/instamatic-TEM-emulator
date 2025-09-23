@@ -5,15 +5,18 @@ from typing import Type, TypeVar
 import numpy as np
 from diffpy import structure as diffpy
 from diffsims.crystallography._diffracting_vector import DiffractingVector
-from diffsims.generators.simulation_generator import (
-    Simulation2D,
-    SimulationGenerator,
-    Vector3d,
-    get_intersection_with_ewalds_sphere,
-    get_kinematical_intensities,
-)
+from diffsims.generators.simulation_generator import Simulation2D, SimulationGenerator
+# from diffsims.generators.simulation_generator import get_intersection_with_ewalds_sphere
+# replaced with SimulationGenerator.get_intersecting_reflections?
 from orix.crystal_map import Phase
 from orix.quaternion import Rotation
+
+
+try:
+    from diffsims.generators.simulation_generator import Vector3D
+except ImportError:  # diffsims 0.7.0+, released after June 4, 2025
+    from diffsims.crystallography.reciprocal_lattice_vector import ReciprocalLatticeVector as Vector3D
+
 
 Crystal_T = TypeVar('Crystal_T', bound='Crystal')
 
@@ -64,7 +67,12 @@ class Crystal:
             lattice=self.lattice,
         )
         self.phase = Phase(space_group=space_group, structure=self.structure)
-        self.recip = DiffractingVector.from_min_dspacing(
+        # self.recip = DiffractingVector.from_min_dspacing(
+        #     self.phase,
+        #     min_dspacing=1,
+        #     include_zero_vector=False,
+        # )  raises exception to use ReciprocalLatticeVector instead - version 0.7.0 issue?
+        self.recip = Vector3D.from_min_dspacing(
             self.phase,
             min_dspacing=1,
             include_zero_vector=False,

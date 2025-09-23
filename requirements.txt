@@ -1,4 +1,4 @@
-#instamatic
-#diffpy.structure
-#diffsims
-#orix (apparently a requirement of one of the above, but better to be explicit)
+diffpy.structure
+diffsims
+instamatic
+orix
