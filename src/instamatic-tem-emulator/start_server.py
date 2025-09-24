@@ -41,9 +41,7 @@ class SharedImageProxy:
     def push(self, image):
         if self.memory is None:
             self.memory = SharedMemory(name='emulator', create=True, size=image.nbytes)
-        print([image.shape, image.dtype, image.nbytes, np.min(image), np.max(image)])
-
-
+        # TODO: adaptive memory size?
         b = np.ndarray(image.shape, dtype=image.dtype, buffer=self.memory.buf)
         b[:] = image[:]
 
@@ -195,7 +193,6 @@ def main():
 
     threading.Thread(target=listen_on, args=(5000, tem)).start()
     threading.Thread(target=listen_on, args=(5001, cam)).start()
-    print('All initialized')
 
 
 if __name__ == '__main__':
