@@ -1,15 +1,16 @@
 import dataclasses
 import datetime
 import logging
-import signal
 import socket
 import threading
+import time
 import traceback
 from dataclasses import field
 from functools import partial
 from multiprocessing.shared_memory import SharedMemory
-from queue import Queue
-from typing import Any, Optional
+from queue import Empty, Queue
+from tqdm import tqdm
+from typing import Any
 
 import numpy as np
 from instamatic import config
@@ -21,32 +22,51 @@ from simulation.camera import CameraEmulator
 
 stop_program_event = threading.Event()
 
-HOST = 'localhost'
-PORT = 8000
+TEM_PORT = config.settings.tem_server_port
+CAM_PORT = config.settings.cam_server_port
 BUFFER_SIZE = 1024
 
 date = datetime.datetime.now().strftime('%Y-%m-%d')
 logfile = config.locations['logs'] / f'instamatic_TEM_emulator_{date}.log'
-logging.basicConfig(
-    level=logging.INFO,
-    filename=logfile,
-    format='%(name)-4s: %(levelname)-8s %(message)s',
-)
+logging_fmt = '%(asctime)s %(name)-4s: %(levelname)-8s %(message)s'
+logging.basicConfig(level=logging.INFO, filename=logfile, format=logging_fmt)
 
 
 class SharedImageProxy:
-    def __init__(self):
-        self.memory = None
+    memory = None
 
-    def push(self, image):
-        if self.memory is None:
-            self.memory = SharedMemory(name='emulator', create=True, size=image.nbytes)
-        # TODO: adaptive memory size?
-        b = np.ndarray(image.shape, dtype=image.dtype, buffer=self.memory.buf)
+    @classmethod
+    def initialize(cls, image_size: int):
+        cls.release()
+        try:
+            cls.memory = SharedMemory(name='emulator', create=True, size=image_size)
+        except FileExistsError:  # if the stale shared memory exists somewhere
+            stale = SharedMemory(name='emulator')
+            stale.close()
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+            cls.memory = SharedMemory(name='emulator', create=True, size=image_size)
+
+    @classmethod
+    def push(cls, image):
+        image_size = image.nbytes
+        if cls.memory is None or cls.memory.size != image_size:
+            cls.initialize(image_size=image_size)
+        b = np.ndarray(image.shape, dtype=image.dtype, buffer=cls.memory.buf)
         b[:] = image[:]
 
-
-shared_image_proxy = SharedImageProxy()
+    @classmethod
+    def release(cls):
+        if cls.memory is not None:
+            cls.memory.close()
+            try:
+                cls.memory.unlink()
+            except FileNotFoundError:
+                pass
+            finally:
+                cls.memory = None
 
 
 EmulatedDeviceImplementation = Any
@@ -81,9 +101,14 @@ class EmulatedDeviceServer(threading.Thread):
     def run(self):
         """Continuously communicate with the underlying `_device`"""
         self.device = self._device_kind.cls(**self._device_init_kwargs)
-        self._device_kind.log.info(f'Initialized connection to {self.device.name}')
+        self._device_kind.log.info(f'Initialized {self.device.name} server')
         while True:
-            cmd = self._device_kind.queue.get()
+            try:
+                cmd = self._device_kind.queue.get(timeout=1.0)
+            except Empty:
+                if stop_program_event.is_set():
+                    break
+                continue
             with self._device_kind.is_working:
                 func_name = cmd.get('func_name', cmd.get('attr_name'))
                 args = cmd.get('args', ())
@@ -111,7 +136,7 @@ class EmulatedDeviceServer(threading.Thread):
         except TypeError:  # TypeError: 'attribute class' object is not callable
             ret = f
         if func_name in {'get_image', 'get_movie'}:
-            shared_image_proxy.push(image=ret)
+            SharedImageProxy.push(image=ret)
             ret = {'name': 'emulator', 'shape': ret.shape, 'dtype': str(ret.dtype)}
         return ret
 
@@ -140,19 +165,20 @@ def handle(connection: socket.socket, device_kind: EmulatedDeviceKind) -> None:
 
 def listen_on(port: int, kind: EmulatedDeviceKind) -> None:
     """Listen on a given port and handle incoming instructions"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", port))
-        s.listen()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as device_client:
+        device_client.bind(("localhost", port))
+        device_client.settimeout(1.0)
+        device_client.listen()
         while True:
-            connection, _ = s.accept()
+            if stop_program_event.is_set():
+                break
             try:
+                connection, _ = device_client.accept()
                 handle(connection, kind)
+            except socket.timeout:
+                pass
             except Exception as e:
-                logging.exception('Exception when handling connection: %s', e)
-
-
-def handle_keyboard_interrupt(*_) -> None:
-    stop_program_event.set()
+                kind.log.exception('Exception when handling connection: %s', e)
 
 
 def main():
@@ -176,9 +202,7 @@ def main():
     The response is returned as a serialized object.
     """
 
-    # add parser and parser arguments here and uncomment options when needed
-    # parser = argparse.ArgumentParser(description=main.__doc__)
-    # options = parser.parse_args()
+    logging.info('Emulator starting')
 
     tem = EmulatedDeviceKind('microscope', SimuMicroscope, logging.getLogger('tem'))
     cam = EmulatedDeviceKind('camera', CameraEmulator, logging.getLogger('cam'))
@@ -186,13 +210,35 @@ def main():
     tem_server = EmulatedDeviceServer(device_kind=tem)
     tem_server.start()
 
+    for _ in tqdm(range(100), desc='Waiting for TEM device', leave=False):
+        if getattr(tem_server, 'device') is not None:  # wait until TEM initialized
+            break
+        time.sleep(0.05)
+    else:  # extremely unlikely, only raises if simulated TEM can't start in 5 s
+        raise RuntimeError('Could not start TEM device on server on time')
+
     cam_server = EmulatedDeviceServer(device_kind=cam, tem=tem_server.device)
     cam_server.start()
 
-    signal.signal(signal.SIGINT, handle_keyboard_interrupt)
+    tem_listener = threading.Thread(target=listen_on, args=(TEM_PORT, tem))
+    tem_listener.start()
 
-    threading.Thread(target=listen_on, args=(5000, tem)).start()
-    threading.Thread(target=listen_on, args=(5001, cam)).start()
+    cam_listener = threading.Thread(target=listen_on, args=(CAM_PORT, cam))
+    cam_listener.start()
+
+    try:
+        while not stop_program_event.is_set(): time.sleep(0.5)
+    except KeyboardInterrupt:
+        logging.info("Received KeyboardInterrupt, shutting down...")
+    finally:
+        stop_program_event.set()
+        SharedImageProxy.release()
+        tem_server.join()
+        cam_server.join()
+        tem_listener.join()
+        cam_listener.join()
+        logging.info('Emulator shutting down')
+        logging.shutdown()
 
 
 if __name__ == '__main__':

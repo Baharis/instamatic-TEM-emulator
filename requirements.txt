@@ -2,3 +2,4 @@ diffpy.structure
 diffsims
 instamatic
 orix
+tqdm
