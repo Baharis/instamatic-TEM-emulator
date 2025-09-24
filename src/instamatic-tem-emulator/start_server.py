@@ -1,4 +1,5 @@
 import dataclasses
+import datetime
 import logging
 import signal
 import socket
@@ -6,9 +7,12 @@ import threading
 import traceback
 from dataclasses import field
 from functools import partial
+from multiprocessing.shared_memory import SharedMemory
 from queue import Queue
 from typing import Any, Optional
 
+import numpy as np
+from instamatic import config
 from instamatic.microscope.interface.simu_microscope import SimuMicroscope
 from instamatic.server.serializer import dumper, loader
 
@@ -21,12 +25,30 @@ HOST = 'localhost'
 PORT = 8000
 BUFFER_SIZE = 1024
 
+date = datetime.datetime.now().strftime('%Y-%m-%d')
+logfile = config.locations['logs'] / f'instamatic_TEM_emulator_{date}.log'
+logging.basicConfig(
+    level=logging.INFO,
+    filename=logfile,
+    format='%(name)-4s: %(levelname)-8s %(message)s',
+)
 
-logging.basicConfig(level=logging.INFO)
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-console.setFormatter(logging.Formatter('%(name)-4s: %(levelname)-8s %(message)s'))
-logging.getLogger().addHandler(console)
+
+class SharedImageProxy:
+    def __init__(self):
+        self.memory = None
+
+    def push(self, image):
+        if self.memory is None:
+            self.memory = SharedMemory(name='emulator', create=True, size=image.nbytes)
+        print([image.shape, image.dtype, image.nbytes, np.min(image), np.max(image)])
+
+
+        b = np.ndarray(image.shape, dtype=image.dtype, buffer=self.memory.buf)
+        b[:] = image[:]
+
+
+shared_image_proxy = SharedImageProxy()
 
 
 EmulatedDeviceImplementation = Any
@@ -65,7 +87,7 @@ class EmulatedDeviceServer(threading.Thread):
         while True:
             cmd = self._device_kind.queue.get()
             with self._device_kind.is_working:
-                func_name = cmd['func_name']
+                func_name = cmd.get('func_name', cmd.get('attr_name'))
                 args = cmd.get('args', ())
                 kwargs = cmd.get('kwargs', {})
 
@@ -84,9 +106,16 @@ class EmulatedDeviceServer(threading.Thread):
 
     def evaluate(self, func_name: str, args: list, kwargs: dict):
         """Eval and call `self._device.func_name` with `args` and `kwargs`."""
-        logging.info(func_name, args, kwargs)
+        self._device_kind.log.info(f'eval {func_name}, {args}, {kwargs}')
         f = getattr(self.device, func_name)
-        return f(*args, **kwargs)
+        try:
+            ret = f(*args, **kwargs)
+        except TypeError:  # TypeError: 'attribute class' object is not callable
+            ret = f
+        if func_name in {'get_image', 'get_movie'}:
+            shared_image_proxy.push(image=ret)
+            ret = {'name': 'emulator', 'shape': ret.shape, 'dtype': str(ret.dtype)}
+        return ret
 
 
 def handle(connection: socket.socket, device_kind: EmulatedDeviceKind) -> None:
@@ -101,7 +130,7 @@ def handle(connection: socket.socket, device_kind: EmulatedDeviceKind) -> None:
 
             data = loader(data)
 
-            if data in {'exit', 'kill'}:
+            if data == 'exit' or data == 'kill':  # can't use "in", dict is unhashable
                 break
 
             with device_kind.is_working:
