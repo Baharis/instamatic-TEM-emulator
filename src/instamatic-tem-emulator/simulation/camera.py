@@ -12,7 +12,7 @@ from .stage import Stage
 class CameraEmulator(CameraBase):
     streamable = True
 
-    def __init__(self, tem: MicroscopeBase, name: str = 'simulate'):
+    def __init__(self, tem: MicroscopeBase, name: str = 'emulator'):
         super().__init__(name)
 
         self.tem = tem
@@ -93,3 +93,18 @@ class CameraEmulator(CameraBase):
         # assume 50x = 2mm full size
         half_width = 50 * 1e6 / mag  # 2mm/2 in nm is 1e6
         return -half_width, half_width, -half_width, half_width
+
+    def get_attrs(self):
+        """Get attributes from cam object to update __dict__ on client side."""
+        attrs = {}
+        for item in dir(self):
+            if item.startswith('_'):
+                continue
+            obj = getattr(self, item)
+            if not callable(obj):
+                attrs[item] = type(obj)
+
+        return attrs
+
+    def get_image_dimensions(self) -> Tuple[int, int]:
+        return self.get_camera_dimensions()

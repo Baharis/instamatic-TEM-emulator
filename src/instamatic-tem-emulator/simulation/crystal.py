@@ -6,8 +6,6 @@ import numpy as np
 from diffpy import structure as diffpy
 from diffsims.crystallography._diffracting_vector import DiffractingVector
 from diffsims.generators.simulation_generator import Simulation2D, SimulationGenerator
-# from diffsims.generators.simulation_generator import get_intersection_with_ewalds_sphere
-# replaced with SimulationGenerator.get_intersecting_reflections?
 from orix.crystal_map import Phase
 from orix.quaternion import Rotation
 
@@ -203,6 +201,10 @@ class Crystal:
         max_excitation_error = excitation_error
 
         rotation = Rotation.from_matrix(rotation_matrix)
+        from diffsims.generators.simulation_generator import (
+            Vector3d,
+            get_intersection_with_ewalds_sphere,
+        )
         optical_axis = rotation * Vector3d.zvector()
 
         # Calculate the reciprocal lattice vectors that intersect the Ewald sphere.
