@@ -1,11 +1,10 @@
-import dataclasses
 import datetime
 import logging
 import socket
 import threading
 import time
 import traceback
-from dataclasses import field
+from dataclasses import dataclass, field
 from functools import partial
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty, Queue
@@ -25,6 +24,8 @@ stop_program_event = threading.Event()
 TEM_PORT = config.settings.tem_server_port
 CAM_PORT = config.settings.cam_server_port
 BUFFER_SIZE = 1024
+NAME = 'emulator'
+TIMEOUT = 0.5
 
 date = datetime.datetime.now().strftime('%Y-%m-%d')
 logfile = config.locations['logs'] / f'instamatic_TEM_emulator_{date}.log'
@@ -36,21 +37,21 @@ class SharedImageProxy:
     memory = None
 
     @classmethod
-    def initialize(cls, image_size: int):
+    def initialize(cls, image_size: int) -> None:
         cls.release()
         try:
-            cls.memory = SharedMemory(name='emulator', create=True, size=image_size)
+            cls.memory = SharedMemory(name=NAME, create=True, size=image_size)
         except FileExistsError:  # if the stale shared memory exists somewhere
-            stale = SharedMemory(name='emulator')
+            stale = SharedMemory(name=NAME)
             stale.close()
             try:
                 stale.unlink()
             except FileNotFoundError:
                 pass
-            cls.memory = SharedMemory(name='emulator', create=True, size=image_size)
+            cls.memory = SharedMemory(name=NAME, create=True, size=image_size)
 
     @classmethod
-    def push(cls, image):
+    def push(cls, image) -> None:
         image_size = image.nbytes
         if cls.memory is None or cls.memory.size != image_size:
             cls.initialize(image_size=image_size)
@@ -58,28 +59,28 @@ class SharedImageProxy:
         b[:] = image[:]
 
     @classmethod
-    def release(cls):
-        if cls.memory is not None:
-            cls.memory.close()
-            try:
-                cls.memory.unlink()
-            except FileNotFoundError:
-                pass
-            finally:
-                cls.memory = None
+    def release(cls) -> None:
+        if cls.memory is None:
+            return
+        cls.memory.close()
+        try:
+            cls.memory.unlink()
+        except FileNotFoundError:
+            pass
+        cls.memory = None
 
 
-EmulatedDeviceImplementation = Any
+EmulatedDeviceImplementation = Any  # CameraBase/MicroscopeBase subclass instance
 
 
-@dataclasses.dataclass
+@dataclass
 class EmulatedDeviceKind:
     """Declares devices that can be handled by the EmulatedDeviceServer"""
     name: str  # a human-readable noun that describes the device kind
     cls: EmulatedDeviceImplementation
     log: logging.Logger = field(default_factory=logging.getLogger)
     queue: Queue = field(default_factory=partial(Queue, maxsize=100))
-    response_cache: list = field(default_factory=list)
+    response_cache: list[tuple[int, Any]] = field(default_factory=list)
     is_working: threading.Condition = field(default_factory=threading.Condition)
 
 
@@ -98,13 +99,13 @@ class EmulatedDeviceServer(threading.Thread):
         self._device_kind: EmulatedDeviceKind = device_kind
         self.verbose = False
 
-    def run(self):
+    def run(self) -> None:
         """Continuously communicate with the underlying `_device`"""
         self.device = self._device_kind.cls(**self._device_init_kwargs)
         self._device_kind.log.info(f'Initialized {self.device.name} server')
         while True:
             try:
-                cmd = self._device_kind.queue.get(timeout=1.0)
+                cmd = self._device_kind.queue.get(timeout=TIMEOUT)
             except Empty:
                 if stop_program_event.is_set():
                     break
@@ -127,7 +128,7 @@ class EmulatedDeviceServer(threading.Thread):
                 self._device_kind.is_working.notify()
                 self._device_kind.log.info("%s  %s: %s" % (status, func_name, ret))
 
-    def evaluate(self, func_name: str, args: list, kwargs: dict):
+    def evaluate(self, func_name: str, args: list, kwargs: dict) -> Any:
         """Eval and call `self._device.func_name` with `args` and `kwargs`."""
         self._device_kind.log.info(f'eval {func_name}, {args}, {kwargs}')
         f = getattr(self.device, func_name)
@@ -137,7 +138,7 @@ class EmulatedDeviceServer(threading.Thread):
             ret = f
         if func_name in {'get_image', 'get_movie'}:
             SharedImageProxy.push(image=ret)
-            ret = {'name': 'emulator', 'shape': ret.shape, 'dtype': str(ret.dtype)}
+            ret = {'name': NAME, 'shape': ret.shape, 'dtype': str(ret.dtype)}
         return ret
 
 
@@ -167,7 +168,7 @@ def listen_on(port: int, kind: EmulatedDeviceKind) -> None:
     """Listen on a given port and handle incoming instructions"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as device_client:
         device_client.bind(("localhost", port))
-        device_client.settimeout(1.0)
+        device_client.settimeout(TIMEOUT)
         device_client.listen()
         while True:
             if stop_program_event.is_set():
@@ -181,7 +182,7 @@ def listen_on(port: int, kind: EmulatedDeviceKind) -> None:
                 kind.log.exception('Exception when handling connection: %s', e)
 
 
-def main():
+def main() -> None:
     """Initialize emulated devices, open and handle communication for each.
 
     This program starts up an emulated TEM and camera and opens a socket for
@@ -202,7 +203,7 @@ def main():
     The response is returned as a serialized object.
     """
 
-    logging.info('Emulator starting')
+    logging.info(f'{NAME.title()} starting')
 
     tem = EmulatedDeviceKind('microscope', SimuMicroscope, logging.getLogger('tem'))
     cam = EmulatedDeviceKind('camera', CameraEmulator, logging.getLogger('cam'))
@@ -215,7 +216,7 @@ def main():
             break
         time.sleep(0.05)
     else:  # extremely unlikely, only raises if simulated TEM can't start in 5 s
-        raise RuntimeError('Could not start TEM device on server on time')
+        raise RuntimeError('Could not start TEM device on server in 5 seconds')
 
     cam_server = EmulatedDeviceServer(device_kind=cam, tem=tem_server.device)
     cam_server.start()
@@ -227,7 +228,7 @@ def main():
     cam_listener.start()
 
     try:
-        while not stop_program_event.is_set(): time.sleep(0.5)
+        while not stop_program_event.is_set(): time.sleep(TIMEOUT)
     except KeyboardInterrupt:
         logging.info("Received KeyboardInterrupt, shutting down...")
     finally:
@@ -237,7 +238,7 @@ def main():
         cam_server.join()
         tem_listener.join()
         cam_listener.join()
-        logging.info('Emulator shutting down')
+        logging.info(f'{NAME.title()} shutting down')
         logging.shutdown()
 
 
