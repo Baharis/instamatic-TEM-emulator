@@ -192,21 +192,29 @@ def main() -> None:
     """Initialize emulated devices, open and handle communication for each.
 
     This program starts up an emulated TEM and camera and opens a socket for
-    each of them. Both TEM and camera run in separate threads but the camera
-    reads the state of the TEM and simulates an image accordingly. The server
-    behaves like an actual TEM/camera pair. The HOST and PORT of two opened
-    sockets depend on the settings. The purpose of this emulator is to provide
+    each of them. The settings are taken directly from instamatic.config, so if
+    the emulator runs on the same computer, it is only necessary to specify
+    `use_tem/cam_server: True`, `tem/cam_server_host: 'localhost'` and run
+    the emulator before running instamatic to connect.
+
+    Note that due to peculiarities of instamatic client-server architecture,
+    in camera config one must specify `interface: serval` or other interface
+    other than `simulate`. This is used only to establish an interface,
+    and the peculiarity will be patched in the future.
+
+    Both emulated TEM and camera run in separate threads, but the camera reads
+    the state of the TEM and simulates an image accordingly. The server behaves
+    like an actual TEM/camera pair. The purpose of this emulator is to provide
     a stable, performant, consistent, and accurate image simulation for testing.
 
-    Settings (ports, simulation) are defined in `config/settings.yaml`.
-
-    The data sent over the socket is a serialized dictionary with the following elements:
+    The data sent over the socket is a serialized dictionary with the following:
 
     - `func_name`: Name of the function to call (str)
     - `args`: (Optional) List of arguments for the function (list)
     - `kwargs`: (Optional) Dictionary of keyword arguments for the function (dict)
 
-    The response is returned as a serialized object.
+    Other than the simulated camera images i.e. numpy arrays passed via
+    a shared memory region, the response is returned as a serialized object.
     """
 
     parser = ArgumentParser(description=main.__doc__)
@@ -234,7 +242,7 @@ def main() -> None:
         if getattr(tem_server, 'device') is not None:  # wait until TEM initialized
             break
         time.sleep(0.05)
-    else:  # extremely unlikely, only raises if simulated TEM can't start in 5 s
+    else:  # necessary check, Error extremely unlikely, TEM typically starts in ms
         raise RuntimeError('Could not start TEM device on server in 5 seconds')
 
     cam_server = EmulatedDeviceServer(device_kind=cam, tem=tem_server.device)
