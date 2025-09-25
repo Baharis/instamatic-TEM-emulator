@@ -4,6 +4,7 @@ import socket
 import threading
 import time
 import traceback
+from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from functools import partial
 from multiprocessing.shared_memory import SharedMemory
@@ -49,6 +50,7 @@ class SharedImageProxy:
             except FileNotFoundError:
                 pass
             cls.memory = SharedMemory(name=NAME, create=True, size=image_size)
+        logging.info(f'New SharedMemory(name="{NAME}", size={image_size}) created')
 
     @classmethod
     def push(cls, image) -> None:
@@ -102,7 +104,8 @@ class EmulatedDeviceServer(threading.Thread):
     def run(self) -> None:
         """Continuously communicate with the underlying `_device`"""
         self.device = self._device_kind.cls(**self._device_init_kwargs)
-        self._device_kind.log.info(f'Initialized {self.device.name} server')
+        thread_desc = f'{self.device.name} {self._device_kind.name} server thread'
+        self._device_kind.log.info('Started ' + thread_desc)
         while True:
             try:
                 cmd = self._device_kind.queue.get(timeout=TIMEOUT)
@@ -126,11 +129,12 @@ class EmulatedDeviceServer(threading.Thread):
 
                 self._device_kind.response_cache.append((status, ret))
                 self._device_kind.is_working.notify()
-                self._device_kind.log.info("%s  %s: %s" % (status, func_name, ret))
+                self._device_kind.log.debug("%s  %s: %s" % (status, func_name, ret))
+        self._device_kind.log.info('Terminating ' + thread_desc)
 
     def evaluate(self, func_name: str, args: list, kwargs: dict) -> Any:
         """Eval and call `self._device.func_name` with `args` and `kwargs`."""
-        self._device_kind.log.info(f'eval {func_name}, {args}, {kwargs}')
+        self._device_kind.log.debug(f'eval {func_name}, {args}, {kwargs}')
         f = getattr(self.device, func_name)
         try:
             ret = f(*args, **kwargs)
@@ -164,22 +168,24 @@ def handle(connection: socket.socket, device_kind: EmulatedDeviceKind) -> None:
                 connection.send(dumper(response))
 
 
-def listen_on(port: int, kind: EmulatedDeviceKind) -> None:
+def listen_on(port: int, device_kind: EmulatedDeviceKind) -> None:
     """Listen on a given port and handle incoming instructions"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as device_client:
         device_client.bind(("localhost", port))
         device_client.settimeout(TIMEOUT)
         device_client.listen()
+        device_kind.log.info(f'Started {device_kind.name} listener thread')
         while True:
             if stop_program_event.is_set():
                 break
             try:
                 connection, _ = device_client.accept()
-                handle(connection, kind)
+                handle(connection, device_kind)
             except socket.timeout:
                 pass
             except Exception as e:
-                kind.log.exception('Exception when handling connection: %s', e)
+                device_kind.log.exception('Exception when handling connection: %s', e)
+        device_kind.log.info(f'Terminating {device_kind.name} listener thread')
 
 
 def main() -> None:
@@ -198,10 +204,23 @@ def main() -> None:
 
     - `func_name`: Name of the function to call (str)
     - `args`: (Optional) List of arguments for the function (list)
-    - `kwargs`: (Optiona) Dictionary of keyword arguments for the function (dict)
+    - `kwargs`: (Optional) Dictionary of keyword arguments for the function (dict)
 
     The response is returned as a serialized object.
     """
+
+    parser = ArgumentParser(description=main.__doc__)
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        dest='verbose',
+        help='Log DEBUG messages in addition to standard INFO-level messages',
+        default=0,
+    )
+    options = parser.parse_args()
+    if options.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     logging.info(f'{NAME.title()} starting')
 
